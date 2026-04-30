@@ -1,0 +1,106 @@
+import cv2
+import face_recognition
+import serial
+import time
+import os
+
+# ---- Setup Serial Connection ----
+try:
+    arduino = serial.Serial('/dev/tty.usbmodem101', 9600)
+    time.sleep(2)  # Allow Arduino to reset
+    print("✅ Serial port opened successfully")
+except serial.SerialException as e:
+    print(f"❌ Could not open serial port: {e}")
+    exit()
+
+# ---- Load and Encode Multiple Known Faces ----
+known_face_encodings = []
+known_face_names = []
+
+face_folder = "known_faces"
+
+for filename in os.listdir(face_folder):
+    if filename.endswith((".jpg", ".png")):
+        name = os.path.splitext(filename)[0]
+        path = os.path.join(face_folder, filename)
+        image = face_recognition.load_image_file(path)
+        encoding = face_recognition.face_encodings(image)
+        if encoding:
+            known_face_encodings.append(encoding[0])
+            known_face_names.append(name)
+            print(f"Loaded face: {name}")
+        else:
+            print(f"⚠️ No face found in {filename}, skipping.")
+
+print(f"\n{len(known_face_encodings)} authorized face(s) loaded.")
+print("Starting face recognition. Press 'q' to quit.\n")
+
+# ---- Start Webcam ----
+video_capture = cv2.VideoCapture(0)
+
+face_recognized = False
+
+while True:
+    ret, frame = video_capture.read()
+    if not ret:
+        print("❌ Failed to grab frame.")
+        break
+
+    # Resize for faster processing
+    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+
+    # Detect faces in current frame
+    face_locations = face_recognition.face_locations(rgb_small_frame)
+    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+
+    for face_encoding in face_encodings:
+        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+        name = "Unknown"
+
+        if True in matches:
+            match_index = matches.index(True)
+            name = known_face_names[match_index]
+            print(f"✅ Recognized {name} — LED ON")
+
+            # Send signal to Arduino
+            arduino.write(b'face_ok\n')
+            face_recognized = True
+
+            # Wait for RFID confirmation from Arduino
+            print("Waiting for RFID scan...")
+            start_time = time.time()
+            rfid_verified = False
+
+            while time.time() - start_time < 10:  # 10 second timeout
+                if arduino.in_waiting > 0:
+                    response = arduino.readline().decode('utf-8').strip()
+                    print(f"Arduino response: {response}")
+                    if response == "rfid_ok":
+                        rfid_verified = True
+                        break
+
+            if rfid_verified:
+                print("✅ RFID Verified. Both factors passed. Access Granted.")
+                video_capture.release()
+                cv2.destroyAllWindows()
+                arduino.close()
+                exit()
+            else:
+                print("❌ RFID timeout or unauthorized. Please try again.")
+                face_recognized = False
+
+        else:
+            print(f"❌ Face detected but not recognized.")
+
+    # Display the frame
+    cv2.imshow('Vehicle Face Recognition', frame)
+
+    # Press 'q' to quit
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Cleanup
+video_capture.release()
+cv2.destroyAllWindows()
+arduino.close()
